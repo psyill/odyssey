@@ -32,6 +32,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
@@ -69,7 +71,6 @@ import java.util.Timer;
 import java.util.TimerTask;
 
 public class PlaybackService extends Service implements AudioManager.OnAudioFocusChangeListener, MetaDataLoader.MetaDataLoaderListener {
-
     /**
      * enums for random, repeat state
      */
@@ -150,6 +151,30 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
 
     private static final int PENDING_INTENT_UPDATE_CURRENT_FLAG =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE : PendingIntent.FLAG_UPDATE_CURRENT;
+
+    private interface AudioFocusRequester {
+        int requestFocus();
+    }
+    private final AudioFocusRequester mAudioFocusRequester = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ? new AudioFocusRequester() {
+        private final AudioAttributes mAudioAttributes = new AudioAttributes.Builder()
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .build();
+        private final AudioFocusRequest mAudioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(mAudioAttributes)
+                .build();
+        @Override
+        public int requestFocus() {
+            AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            return audioManager.requestAudioFocus(mAudioFocusRequest);
+        }
+    } : new AudioFocusRequester() {
+        @Override
+        public int requestFocus() {
+            AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            return audioManager.requestAudioFocus(PlaybackService.this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        }
+    };
 
     /**
      * Handler that executes action requested by a message
@@ -473,7 +498,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
      * Stops all playback and the service afterwards, because it usually is not required afterwards
      */
     public void stop() {
-        if (mCurrentList.size() > 0 && mCurrentPlayingIndex >= 0 && (mCurrentPlayingIndex < mCurrentList.size())) {
+        if (!mCurrentList.isEmpty() && mCurrentPlayingIndex >= 0 && (mCurrentPlayingIndex < mCurrentList.size())) {
             // Notify simple last.fm scrobbler about playback stop
             mPlaybackServiceStatusHelper.notifyLastFM(mCurrentList.get(mCurrentPlayingIndex), PlaybackServiceStatusHelper.SLS_STATES.SLS_COMPLETE);
         }
@@ -482,7 +507,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
         mPlayer.stop();
 
         // Stop should always set the index to zero (if tracks are available, otherwise -1)
-        mCurrentPlayingIndex = mCurrentList.size() == 0 ? INDEX_NO_TRACKS_AVAILABLE : 0;
+        mCurrentPlayingIndex = mCurrentList.isEmpty() ? INDEX_NO_TRACKS_AVAILABLE : 0;
 
         mLastPosition = -1;
 
@@ -571,7 +596,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
         }
 
         // Check if no mCurrentPlayingIndex is available which means that we should start playing position 0 (if available).
-        if (mCurrentPlayingIndex < 0 && mCurrentList.size() > 0) {
+        if (mCurrentPlayingIndex < 0 && !mCurrentList.isEmpty()) {
             // Songs exist, so start playback of playlist begin
             jumpToIndex(0);
         } else if (mCurrentPlayingIndex < 0) {
@@ -592,8 +617,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
             }
 
             // Request audio focus before doing anything
-            AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-            int result = audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+            final int result = mAudioFocusRequester.requestFocus();
             if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 // Abort command if we don't acquired the audio focus
                 return;
@@ -667,7 +691,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
     public void shufflePlaylist() {
         final PLAYSTATE state = getPlaybackState();
 
-        if (mCurrentList.size() > 0 && mCurrentPlayingIndex >= 0 && (mCurrentPlayingIndex < mCurrentList.size())) {
+        if (!mCurrentList.isEmpty() && mCurrentPlayingIndex >= 0 && (mCurrentPlayingIndex < mCurrentList.size())) {
             // get the current TrackModel and remove it from playlist
             TrackModel currentItem = mCurrentList.get(mCurrentPlayingIndex);
             mCurrentList.remove(mCurrentPlayingIndex);
@@ -693,7 +717,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
                     handlePlaybackException(e);
                 }
             }
-        } else if (mCurrentList.size() > 0 && mCurrentPlayingIndex < 0) {
+        } else if (!mCurrentList.isEmpty() && mCurrentPlayingIndex < 0) {
             // service stopped just shuffle playlist
             Collections.shuffle(mCurrentList);
 
@@ -841,6 +865,8 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
              * "bound service"
              */
             Intent serviceStartIntent = new Intent(this, PlaybackService.class);
+            // TODO: Check this up. Here we state that we're starting a foreground service from the
+            // background, which is not always permitted, starting from at least Android 17.
             serviceStartIntent.addFlags(Intent.FLAG_FROM_BACKGROUND);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(serviceStartIntent);
@@ -852,8 +878,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
             TrackModel item = mCurrentList.get(mCurrentPlayingIndex);
 
             // Request audio focus before doing anything
-            AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-            int result = audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+            final int result = mAudioFocusRequester.requestFocus();
             if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 // Abort command if audio focus was not granted
                 return;
@@ -1191,7 +1216,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
         }
 
         // Check if a song remains
-        if (mCurrentList.size() == 0) {
+        if (mCurrentList.isEmpty()) {
             // No track remains
             stop();
         }
@@ -1291,7 +1316,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
         }
 
         // Check if a song remains
-        if (mCurrentList.size() == 0) {
+        if (mCurrentList.isEmpty()) {
             // No track remains
             stop();
         }
@@ -1370,7 +1395,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
 
         saveState();
 
-        if (mCurrentList.size() > 0 && mCurrentPlayingIndex >= 0 && (mCurrentPlayingIndex < mCurrentList.size())) {
+        if (!mCurrentList.isEmpty() && mCurrentPlayingIndex >= 0 && (mCurrentPlayingIndex < mCurrentList.size())) {
             // Notify simple last.fm scrobbler about playback stop
             mPlaybackServiceStatusHelper.notifyLastFM(mCurrentList.get(mCurrentPlayingIndex), PlaybackServiceStatusHelper.SLS_STATES.SLS_COMPLETE);
         }
@@ -1775,7 +1800,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
      * Returns the playback state of the service
      */
     public PLAYSTATE getPlaybackState() {
-        if (mCurrentList.size() > 0 && mCurrentPlayingIndex >= 0) {
+        if (!mCurrentList.isEmpty() && mCurrentPlayingIndex >= 0) {
             // Check current playback state. If playing inform all listeners and
             // check if notification is set, and set if not.
             if (mPlayer.isRunning() && (mCurrentPlayingIndex < mCurrentList.size())) {
@@ -1851,7 +1876,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
      */
     private void randomizeNextTrack() {
         // Set next index to random one
-        if (mCurrentList.size() > 0) {
+        if (!mCurrentList.isEmpty()) {
             mNextPlayingIndex = mTrackRandomGenerator.getRandomTrackNumber();
         }
     }
@@ -1943,9 +1968,9 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
                     case REPEAT_ALL:
                         // Repeat playlist so set to first PL song if last song is
                         // reached
-                        if (mCurrentList.size() > 0 && mCurrentPlayingIndex + 1 == mCurrentList.size()) {
+                        if (!mCurrentList.isEmpty() && mCurrentPlayingIndex + 1 == mCurrentList.size()) {
                             mNextPlayingIndex = 0;
-                        } else if (mCurrentList.size() > 0 && mCurrentPlayingIndex + 1 < mCurrentList.size()) {
+                        } else if (!mCurrentList.isEmpty() && mCurrentPlayingIndex + 1 < mCurrentList.size()) {
                             // If the end of the playlist was not reached move to the next track
                             mNextPlayingIndex = mCurrentPlayingIndex + 1;
                         }
@@ -1984,7 +2009,7 @@ public class PlaybackService extends Service implements AudioManager.OnAudioFocu
         public void onTrackFinished() {
             // Remember the last track index for moving backwards in the queue.
             mLastPlayingIndex = mCurrentPlayingIndex;
-            if (mCurrentList.size() > 0 && mCurrentPlayingIndex >= 0 && (mCurrentPlayingIndex < mCurrentList.size())) {
+            if (!mCurrentList.isEmpty() && mCurrentPlayingIndex >= 0 && (mCurrentPlayingIndex < mCurrentList.size())) {
                 // Broadcast simple.last.fm.scrobble broadcast about the track finish
                 TrackModel item = mCurrentList.get(mCurrentPlayingIndex);
                 mPlaybackServiceStatusHelper.notifyLastFM(item, PlaybackServiceStatusHelper.SLS_STATES.SLS_COMPLETE);

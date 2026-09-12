@@ -23,11 +23,13 @@
 package org.gateshipone.odyssey.playbackservice;
 
 import android.content.Intent;
+import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.MediaPlayer.OnPreparedListener;
 import android.media.audiofx.AudioEffect;
 import android.net.Uri;
+import android.os.Build;
 import android.util.Log;
 
 import org.gateshipone.odyssey.BuildConfig;
@@ -49,6 +51,7 @@ import java.util.concurrent.Semaphore;
 public class GaplessPlayer {
     private static final String TAG = "OdysseyGaplessPlayer";
 
+    private static final AudioAttributes AUDIO_ATTRIBUTES = new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build();
     /**
      * Timeout after which the {@link MediaPlayer} is released (ms)
      */
@@ -178,7 +181,7 @@ public class GaplessPlayer {
         mCurrentPrepared = false;
 
         // Set the type of the stream to music.
-        mCurrentMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+        mCurrentMediaPlayer.setAudioAttributes(AUDIO_ATTRIBUTES);
         try {
             mCurrentMediaPlayer.setDataSource(mPlaybackService.getApplicationContext(),
                     uri);
@@ -403,7 +406,7 @@ public class GaplessPlayer {
             mNextMediaPlayer.setOnPreparedListener(mSecondaryPreparedListener);
 
             // Set the playback type to music again
-            mNextMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+            mNextMediaPlayer.setAudioAttributes(AUDIO_ATTRIBUTES);
 
             try {
                 // Try setting the data source
